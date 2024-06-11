@@ -1,132 +1,150 @@
 import pandas as pd
 from sklearn.model_selection import train_test_split
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.metrics import accuracy_score
+from sklearn.metrics import accuracy_score, confusion_matrix
+from sklearn.impute import SimpleImputer
 
-# Function to preprocess data
-def preprocess_data(df, train=True, ref_df=None):
-    categorical_columns = ['team_1', 'team_2', 'venue', 'city', 'toss_winner', 'toss_decision', 'player_of_match', 'winner']
-    columns_to_encode = [col for col in categorical_columns if col in df.columns]
-    df = pd.get_dummies(df, columns=columns_to_encode, drop_first=True)
-    
-    if train:
-        if 'date' in df.columns:
-            df.drop(columns=['date'], inplace=True)
-        if 'season' in df.columns:
-            df.drop(columns=['season'], inplace=True)
-    else:
-        for col in ref_df.columns:
-            if col not in df.columns:
-                df[col] = 0
-        df = df[ref_df.columns]
-    
-    return df
+class CricketWorldCupSimulator:
+    def __init__(self, ball_by_ball_path, match_info_path, fixture_path):
+        self.ball_by_ball_path = ball_by_ball_path
+        self.match_info_path = match_info_path
+        self.fixture_path = fixture_path
 
-# Load processed data
-def load_data(filepath):
-    df = pd.read_csv(filepath)
-    print("Processed DataFrame shape:", df.shape)
-    print("Processed DataFrame columns:", df.columns)
-    print("First few rows of the processed DataFrame:\n", df.head())
-    return df
-
-# Handle 'win' column
-def handle_win_column(df):
-    if 'win' in df.columns:
-        df['win'] = pd.to_numeric(df['win'], errors='coerce')
-        df.dropna(subset=['win'], inplace=True)
-    else:
-        raise ValueError("The 'win' column is missing from the processed data")
-    print("Shape after handling 'win' column:", df.shape)
-    if df.empty:
-        raise ValueError("The processed DataFrame is empty after handling 'win' column")
-    return df
-
-# Split data into training and testing sets
-def split_data(df):
-    X = df.drop(columns=['win'])
-    y = df['win'].astype(int)
-    return train_test_split(X, y, test_size=0.2, random_state=42)
-
-# Train the model
-def train_model(X_train, y_train):
-    model = RandomForestClassifier(n_estimators=100, random_state=42)
-    model.fit(X_train, y_train)
-    return model
-
-# Evaluate the model
-def evaluate_model(model, X_test, y_test):
-    y_pred = model.predict(X_test)
-    accuracy = accuracy_score(y_test, y_pred)
-    print(f'Model Accuracy: {accuracy * 100:.2f}%')
-
-# Predict the outcomes of the fixtures
-def predict_match_outcome(fixtures_df, model, processed_df):
-    predictions = []
-    probabilities = []
-    
-    for _, row in fixtures_df.iterrows():
-        match_features = {
-            'team_1': row['team_1'],
-            'team_2': row['team_2'],
-            'venue': row['venue'],
-            'city': row['city'],
-            'toss_winner': row['toss_winner'],
-            'toss_decision': row['toss_decision'],
-            'season': row['season']
+    def load_data(self):
+        dtype_spec = {
+            'wides': 'float64', 'noballs': 'float64', 'byes': 'float64', 
+            'legbyes': 'float64', 'penalty': 'float64'
         }
-        match_df = pd.DataFrame([match_features])
-        match_df = preprocess_data(match_df, train=False, ref_df=processed_df)
-        match_df = match_df.drop(columns=['win'])
+        self.ball_by_ball_df = pd.read_csv(self.ball_by_ball_path, dtype=dtype_spec, low_memory=False)
+        self.match_info_df = pd.read_csv(self.match_info_path)
+        self.fixture_df = pd.read_csv(self.fixture_path)
+
+    def preprocess_data(self):
+        self._convert_dates()
+        self._fill_missing_values()
+        self._standardize_team_names()
+        self.team_stats = self._calculate_team_stats()
+        self.match_stats = self._prepare_training_data()
+
+    def train_model(self):
+        features, target = self._get_features_and_target()
+        X_train, X_val, y_train, y_val = train_test_split(features, target, test_size=0.2, random_state=42)
+
+        self.model = RandomForestClassifier(n_estimators=100, random_state=42)
+        self.model.fit(X_train, y_train)
+
+        y_pred = self.model.predict(X_val)
+        self.accuracy = accuracy_score(y_val, y_pred)
+        self.conf_matrix = confusion_matrix(y_val, y_pred)
+
+        # if self.accuracy < 0.80:
+        #     raise Exception(f"Model accuracy is below 80%. Current accuracy: {self.accuracy:.2f}")
+
+    def simulate_world_cup(self):
+        fixture_stats = self._prepare_fixture_data()
+        fixture_predictions = self.model.predict(fixture_stats)
+        self.fixture_df['prediction'] = fixture_predictions
+
+        group_winners = self.fixture_df.groupby('Group').apply(lambda x: x.loc[x['prediction'].idxmax(), 'Team-A'])
+        self.world_cup_winner = group_winners.mode()[0]
+
+    def _convert_dates(self):
+        self.ball_by_ball_df['start_date'] = pd.to_datetime(self.ball_by_ball_df['start_date'], errors='coerce')
+        self.match_info_df['date'] = pd.to_datetime(self.match_info_df['date'], errors='coerce')
+        self.fixture_df['Date'] = pd.to_datetime(self.fixture_df['Date'], format='%d-%b-%y', errors='coerce')
+
+    def _fill_missing_values(self):
+        imputer = SimpleImputer(strategy='constant', fill_value=0)
+        columns_to_fill = ['wides', 'noballs', 'byes', 'legbyes', 'penalty']
+        self.ball_by_ball_df[columns_to_fill] = imputer.fit_transform(self.ball_by_ball_df[columns_to_fill])
+        self.ball_by_ball_df['wicket_type'].fillna('none', inplace=True)
+        self.ball_by_ball_df['player_dismissed'].fillna('none', inplace=True)
+
+    def _standardize_team_names(self):
+        def standardize_names(df, columns):
+            for col in columns:
+                df[col] = df[col].str.lower().str.strip()
+            return df
         
-        prediction = model.predict(match_df)
-        prediction_proba = model.predict_proba(match_df)
+        self.ball_by_ball_df = standardize_names(self.ball_by_ball_df, ['batting_team', 'bowling_team'])
+        self.match_info_df = standardize_names(self.match_info_df, ['team_1', 'team_2', 'toss_winner', 'winner'])
+        self.fixture_df = standardize_names(self.fixture_df, ['Team-A', 'Team-B'])
+
+    def _calculate_team_stats(self):
+        team_stats = self.ball_by_ball_df.groupby('batting_team').agg({
+            'runs_off_bat': 'sum',
+            'ball': 'count',
+            'wides': 'sum',
+            'noballs': 'sum',
+            'byes': 'sum',
+            'legbyes': 'sum',
+            'wicket_type': lambda x: (x != 'none').count()
+        }).reset_index()
+
+        team_stats.columns = ['team', 'total_runs', 'total_balls', 'total_wides', 'total_noballs', 'total_byes', 'total_legbyes', 'total_wickets']
+        team_stats['average_runs'] = team_stats['total_runs'] / team_stats['total_balls'] * 6
+        team_stats['average_wickets'] = team_stats['total_wickets'] / team_stats['total_balls'] * 6
+        return team_stats
+
+    def _prepare_training_data(self):
+        match_info_df = self.match_info_df.rename(columns={'team_1': 'team', 'team_2': 'opponent'})
+        match_stats = match_info_df.merge(self.team_stats, on='team', how='left')
+        match_stats = match_stats.rename(columns={col: 'team_' + col for col in self.team_stats.columns if col != 'team'})
+
+        match_stats = match_stats.merge(self.team_stats, left_on='opponent', right_on='team', suffixes=('', '_opponent'))
+        match_stats = match_stats.rename(columns={col: 'opponent_' + col for col in self.team_stats.columns if col != 'team'})
+
+        print("Match Stats Columns after merging and renaming:", match_stats.columns)
+
+        # Ensure columns to drop are within the dataframe
+        columns_to_drop = [col for col in ['team_opponent'] if col in match_stats.columns]
+        match_stats.drop(columns=columns_to_drop, inplace=True)
+
+        match_stats.fillna(0, inplace=True)
+
+        if 'winner' not in match_stats.columns or 'team' not in match_stats.columns:
+            raise KeyError("'winner' or 'team' column not found in match_stats")
+
+        match_stats['target'] = (match_stats['winner'] == match_stats['team']).astype(int)
+        return match_stats
+
+    def _get_features_and_target(self):
+        features = [col for col in self.match_stats.columns if col.startswith('team_') or col.startswith('opponent_')]
+        target = self.match_stats['target']
+        return self.match_stats[features], target
+
+    def _prepare_fixture_data(self):
+        fixture_df = self.fixture_df.rename(columns={'Team-A': 'team', 'Team-B': 'opponent'})
+        fixture_stats = fixture_df.merge(self.team_stats, on='team', how='left')
+        fixture_stats = fixture_stats.rename(columns={col: 'team_' + col for col in self.team_stats.columns if col != 'team'})
+
+        fixture_stats = fixture_stats.merge(self.team_stats, left_on='opponent', right_on='team', suffixes=('', '_opponent'))
+        fixture_stats = fixture_stats.rename(columns={col: 'opponent_' + col for col in self.team_stats.columns if col != 'team'})
+        columns_to_drop = [col for col in ['team_opponent', 'team'] if col in fixture_stats.columns]
+        fixture_stats.drop(columns=columns_to_drop, inplace=True)
         
-        predictions.append(prediction[0])
-        probabilities.append(prediction_proba[0])
-    
-    fixtures_df['predicted_winner'] = predictions
-    fixtures_df['team_1_win_probability'] = [prob[0] for prob in probabilities]
-    fixtures_df['team_2_win_probability'] = [prob[1] for prob in probabilities]
-    
-    return fixtures_df
+        fixture_stats.fillna(0, inplace=True)
+        
+        return fixture_stats[[col for col in fixture_stats.columns if col.startswith('team_') or col.startswith('opponent_')]]
 
-# Simulate the tournament
-def simulate_tournament(fixtures_df):
-    teams = set(fixtures_df['team_1']).union(set(fixtures_df['team_2']))
-    team_wins = {team: 0 for team in teams}
-    
-    for _, row in fixtures_df.iterrows():
-        winner = row['predicted_winner']
-        team_wins[winner] += 1
-    
-    tournament_winner = max(team_wins, key=team_wins.get)
-    return tournament_winner
-
-# Main function to run the script
-def main():
-    processed_data_file = './data/processed_data/processed_t20_data.csv'
-    processed_df = load_data(processed_data_file)
-    processed_df = handle_win_column(processed_df)
-    processed_df = preprocess_data(processed_df, train=True)
-    
-    X_train, X_test, y_train, y_test = split_data(processed_df)
-    model = train_model(X_train, y_train)
-    evaluate_model(model, X_test, y_test)
-
-    fixtures_file = './data/fixtures/fixture_T20_world_cup_2024.csv'
-    fixtures_df = pd.read_csv(fixtures_file)
-    
-    predicted_fixtures_df = predict_match_outcome(fixtures_df, model, processed_df)
-    results_file = 'predicted_match_results.csv'
-    predicted_fixtures_df.to_csv(results_file, index=False)
-    
-    tournament_winner = simulate_tournament(predicted_fixtures_df)
-    print(f'The predicted winner of the 2024 T20 Cricket World Cup is: {tournament_winner}')
-    
-    tournament_winner_file = './data/predictions/tournament_winner.csv'
-    tournament_winner_df = pd.DataFrame({'tournament_winner': [tournament_winner]})
-    tournament_winner_df.to_csv(tournament_winner_file, index=False)
+    def run(self):
+        self.load_data()
+        self.preprocess_data()
+        self.train_model()
+        self.simulate_world_cup()
+        return self.world_cup_winner, self.accuracy, self.conf_matrix
 
 if __name__ == "__main__":
-    main()
+    simulator = CricketWorldCupSimulator(
+        ball_by_ball_path='./data/processed_data/ball_by_ball_combined.csv',
+        match_info_path='./data/processed_data/match_info_combined.csv',
+        fixture_path='./data/fixtures/fixture_T20_world_cup_2024.csv'
+    )
+
+    try:
+        winner, accuracy, conf_matrix = simulator.run()
+        print(f"Predicted World Cup Winner: {winner}")
+        print(f"Model Accuracy: {accuracy:.2f}")
+        print(f"Confusion Matrix:\n{conf_matrix}")
+    except Exception as e:
+        print(e)

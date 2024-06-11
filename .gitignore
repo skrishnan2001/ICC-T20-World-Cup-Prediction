@@ -162,4 +162,7 @@ cython_debug/
 #.idea/
 
 #dataset
-./data/t20s_male_csv2
+./data/t20s_male_csv2/
+
+#testing
+test.ipnyb

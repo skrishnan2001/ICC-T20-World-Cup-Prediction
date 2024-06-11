@@ -29,7 +29,7 @@ def normalize_info_dict(info_dict):
     attributes = [
         'team', 'gender', 'season', 'date', 'venue', 'city',
         'toss_winner', 'toss_decision', 'player_of_match',
-        'umpire', 'tv_umpire', 'match_referee', 'winner', 'winner_runs'
+        'umpire', 'tv_umpire', 'match_referee', 'winner', 'winner_runs', 'winner_wickets'
     ]
 
     for key in attributes:
@@ -43,7 +43,7 @@ def normalize_info_dict(info_dict):
     return normalized
 
 # Combination functions
-def combine_info_files(data_dir, output_file):
+def combine_info_files(data_dir, output_file, participating_teams):
     info_files = [f for f in os.listdir(data_dir) if f.endswith('_info.csv')]
     all_info_data = []
 
@@ -54,23 +54,32 @@ def combine_info_files(data_dir, output_file):
 
         if 'team' in normalized_info:
             teams = normalized_info['team'].split(', ')
-            normalized_info['team_1'] = teams[0].strip()
-            normalized_info['team_2'] = teams[1].strip() if len(teams) > 1 else 'Unknown'
-            del normalized_info['team']
+            team_1 = teams[0].strip()
+            team_2 = teams[1].strip() if len(teams) > 1 else 'Unknown'
+            
+            if team_1 in participating_teams and team_2 in participating_teams:
+                normalized_info['team_1'] = team_1
+                normalized_info['team_2'] = team_2
+                del normalized_info['team']
 
-        if 'winner_runs' in normalized_info:
-            normalized_info['win'] = normalized_info['winner_runs'].strip()
-            del normalized_info['winner_runs']
-        else:
-            normalized_info['win'] = 'Unknown'
+                if 'winner_runs' in normalized_info:
+                    normalized_info['win_by_runs'] = normalized_info['winner_runs'].strip()
+                    normalized_info['win_by_wickets'] = '0'
+                    del normalized_info['winner_runs']
+                elif 'winner_wickets' in normalized_info:
+                    normalized_info['win_by_wickets'] = normalized_info['winner_wickets'].strip()
+                    normalized_info['win_by_runs'] = '0'
+                    del normalized_info['winner_wickets']
+                else:
+                    normalized_info['win_by_runs'] = 'Unknown'
+                    normalized_info['win_by_wickets'] = 'Unknown'
 
-        all_info_data.append(normalized_info)
+                all_info_data.append(normalized_info)
 
     info_df = pd.DataFrame(all_info_data)
-
     info_df['date'] = pd.to_datetime(info_df['date'], errors='coerce').dt.strftime('%Y/%m/%d')
 
-    required_columns = ['team_1', 'team_2', 'season', 'date', 'venue', 'city', 'toss_winner', 'toss_decision', 'player_of_match', 'winner', 'win']
+    required_columns = ['team_1', 'team_2', 'season', 'date', 'venue', 'city', 'toss_winner', 'toss_decision', 'player_of_match', 'winner', 'win_by_runs', 'win_by_wickets']
     for col in required_columns:
         if col not in info_df.columns:
             info_df[col] = 'Unknown'
@@ -78,18 +87,25 @@ def combine_info_files(data_dir, output_file):
     info_df = info_df[required_columns]
     info_df.fillna('Unknown', inplace=True)
 
+    # Drop rows where the winner is 'Unknown'
+    info_df = info_df[info_df['winner'] != 'Unknown']
+
     info_df.to_csv(output_file, index=False)
     print(f'Combined info CSV file saved as {output_file}')
 
-def combine_match_files(data_dir, output_file):
+def combine_match_files(data_dir, output_file, participating_teams):
     match_files = [f for f in os.listdir(data_dir) if f.endswith('.csv') and not f.endswith('_info.csv')]
     all_match_data = []
 
     for match_file in match_files:
         file_path = os.path.join(data_dir, match_file)
         match_df = parse_match_file(file_path)
-        match_df['match_id'] = match_file.split('.')[0]
-        all_match_data.append(match_df)
+        
+        # Filter out matches not involving participating teams
+        teams_in_match = match_df[['batting_team', 'bowling_team']].drop_duplicates()
+        if any(team in participating_teams for team in teams_in_match.values.flatten()):
+            match_df['match_id'] = match_file.split('.')[0]
+            all_match_data.append(match_df)
 
     combined_match_df = pd.concat(all_match_data, ignore_index=True)
     combined_match_df.to_csv(output_file, index=False)
@@ -128,9 +144,14 @@ def main():
     info_output_file = './data/processed_data/match_info_combined.csv'
     match_output_file = './data/processed_data/ball_by_ball_combined.csv'
     processed_output_file = './data/processed_data/processed_t20_data.csv'
+    fixture_file = './data/fixtures/fixture_T20_world_cup_2024.csv'
 
-    combine_info_files(data_dir, info_output_file)
-    combine_match_files(data_dir, match_output_file)
+    # Read the fixture file to get the list of participating teams
+    fixtures_df = pd.read_csv(fixture_file)
+    participating_teams = set(fixtures_df['Team-A'].unique()).union(set(fixtures_df['Team-B'].unique()))
+
+    combine_info_files(data_dir, info_output_file, participating_teams)
+    combine_match_files(data_dir, match_output_file, participating_teams)
     preprocess_and_feature_engineer(info_output_file, match_output_file, processed_output_file)
 
 if __name__ == "__main__":
